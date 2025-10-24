@@ -125,7 +125,7 @@ def _plot_and_log_curves(scored_df: DataFrame,
     ax.plot([0, 1], [0, 1], linestyle="--", label="Random")
     ax.set_xlabel("False Positive Rate"); ax.set_ylabel("True Positive Rate")
     ax.set_title(f"ROC Curve {title_suffix}"); ax.legend()
-    roc_path = f"roc_{pf}{ts}.png"; fig.savefig(roc_path, bbox_inches="tight"); mlflow.log_artifact(roc_path); plt.close(fig)
+    roc_path = f"roc_{pf}{ts}.png"; fig.savefig(roc_path, bbox_inches="tight"); mlflow.log_artifact(f"artifacts/{roc_path}"); plt.close(fig)
 
     # PR
     fig, ax = plt.subplots()
@@ -134,7 +134,7 @@ def _plot_and_log_curves(scored_df: DataFrame,
         ax.plot(xs, ys, label=f"PR (AP={auc_pr:.3f})")
     ax.set_xlabel("Recall"); ax.set_ylabel("Precision")
     ax.set_title(f"Precision-Recall Curve {title_suffix}"); ax.legend()
-    pr_path = f"pr_{pf}{ts}.png"; fig.savefig(pr_path, bbox_inches="tight"); mlflow.log_artifact(pr_path); plt.close(fig)
+    pr_path = f"pr_{pf}{ts}.png"; fig.savefig(pr_path, bbox_inches="tight"); mlflow.log_artifact(f"artifacts/{pr_path}"); plt.close(fig)
 
     # Also log AUCs as metrics (you may already log via evaluator)
     #mlflow.log_metrics({"roc_auc_curve_mllib": auc_roc, "pr_auc_curve_mllib": auc_pr})
@@ -442,7 +442,7 @@ def _plot_and_log_curves(scored_df: DataFrame, *, label_col: str, prob_pos_col: 
     ax.plot([0, 1], [0, 1], linestyle="--", label="Random")
     ax.set_xlabel("False Positive Rate"); ax.set_ylabel("True Positive Rate")
     ax.set_title(f"ROC Curve {title_suffix}"); ax.legend()
-    roc_path = f"roc_{pf}{ts}.png"; fig.savefig(roc_path, bbox_inches="tight"); mlflow.log_artifact(roc_path); plt.close(fig)
+    roc_path = f"roc_{pf}{ts}.png"; fig.savefig(roc_path, bbox_inches="tight"); mlflow.log_artifact(f"artifacts/{roc_path}"); plt.close(fig)
 
     # PR
     fig, ax = plt.subplots()
@@ -451,7 +451,7 @@ def _plot_and_log_curves(scored_df: DataFrame, *, label_col: str, prob_pos_col: 
         ax.plot(xs, ys, label=f"PR (AP={auc_pr:.3f})")
     ax.set_xlabel("Recall"); ax.set_ylabel("Precision")
     ax.set_title(f"Precision-Recall Curve {title_suffix}"); ax.legend()
-    pr_path = f"pr_{pf}{ts}.png"; fig.savefig(pr_path, bbox_inches="tight"); mlflow.log_artifact(pr_path); plt.close(fig)
+    pr_path = f"pr_{pf}{ts}.png"; fig.savefig(pr_path, bbox_inches="tight"); mlflow.log_artifactf(f"artifacts/{pr_path}"); plt.close(fig)
 
     # Also log AUCs as metrics (you may already log via evaluator)
     mlflow.log_metrics({"roc_auc_curve_mllib": auc_roc, "pr_auc_curve_mllib": auc_pr})
@@ -540,7 +540,7 @@ def log_feature_importances_pd(
     # params and artifact
     mlflow.log_params({f"top_feature_{i+1}_name": r.feature for i, r in top_df.iterrows()})
     mlflow.log_params({f"top_feature_{i+1}_importance": float(r.importance) for i, r in top_df.iterrows()})
-    path = "feature_importances_topN.csv"; top_df.to_csv(path, index=False); mlflow.log_artifact(path)
+    path = "feature_importances_topN.csv"; top_df.to_csv(path, index=False); mlflow.log_artifact(f"artifacts/{path}")
 
     mlflow.set_tag("feature_importances_available", "true")
     mlflow.set_tag("feature_importances_count", str(len(importances)))
@@ -708,11 +708,11 @@ def run_spark_cv_with_logging_spark_only(
             # CM @ best F1
             tp, fp, fn, tn = _tp_fp_fn_tn(scored_for_plots, label_col=label_col, prob_col_expr=F.col("p_pos"), threshold=best_t_f1)
             fig = _confusion_fig_from_counts(tp, fp, fn, tn, f"Confusion Matrix @ F1={best_t_f1:.3f} ({eval_name})")
-            cm_path = f"cm_{eval_name}_f1_{ts}.png"; fig.savefig(cm_path, bbox_inches="tight"); mlflow.log_artifact(cm_path); plt.close(fig)
+            cm_path = f"cm_{eval_name}_f1_{ts}.png"; fig.savefig(cm_path, bbox_inches="tight"); mlflow.log_artifact(f"artifacts/{cm_path}"); plt.close(fig)
             # CM @ best F2
             tp, fp, fn, tn = _tp_fp_fn_tn(scored_for_plots, label_col=label_col, prob_col_expr=F.col("p_pos"), threshold=best_t_f2)
             fig = _confusion_fig_from_counts(tp, fp, fn, tn, f"Confusion Matrix @ F2={best_t_f2:.3f} ({eval_name})")
-            cm_path = f"cm_{eval_name}_f2_{ts}.png"; fig.savefig(cm_path, bbox_inches="tight"); mlflow.log_artifact(cm_path); plt.close(fig)
+            cm_path = f"cm_{eval_name}_f2_{ts}.png"; fig.savefig(cm_path, bbox_inches="tight"); mlflow.log_artifact(f"artifacts/{cm_path}"); plt.close(fig)
 
         if log_curves:
             _plot_and_log_curves(
@@ -745,11 +745,11 @@ def run_spark_cv_with_logging_spark_only(
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 tp, fp, fn, tn = _tp_fp_fn_tn(scored_test_plots, label_col=label_col, prob_col_expr=F.col("p_pos"), threshold=best_t_f1)
                 fig = _confusion_fig_from_counts(tp, fp, fn, tn, f"Confusion Matrix @ F1={best_t_f1:.3f} (heldout test)")
-                cm_path = f"cm_test_f1_{ts}.png"; fig.savefig(cm_path, bbox_inches="tight"); mlflow.log_artifact(cm_path); plt.close(fig)
+                cm_path = f"cm_test_f1_{ts}.png"; fig.savefig(cm_path, bbox_inches="tight"); mlflow.log_artifact(f"artifacts/{cm_path}"); plt.close(fig)
 
                 tp, fp, fn, tn = _tp_fp_fn_tn(scored_test_plots, label_col=label_col, prob_col_expr=F.col("p_pos"), threshold=best_t_f2)
                 fig = _confusion_fig_from_counts(tp, fp, fn, tn, f"Confusion Matrix @ F2={best_t_f2:.3f} (heldout test)")
-                cm_path = f"cm_test_f2_{ts}.png"; fig.savefig(cm_path, bbox_inches="tight"); mlflow.log_artifact(cm_path); plt.close(fig)
+                cm_path = f"cm_test_f2_{ts}.png"; fig.savefig(cm_path, bbox_inches="tight"); mlflow.log_artifact(f"artifacts/{cm_path}"); plt.close(fig)
 
             if log_curves:
                 _plot_and_log_curves(scored_test_plots, label_col=label_col, prob_pos_col="p_pos",
