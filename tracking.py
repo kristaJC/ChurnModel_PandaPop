@@ -436,7 +436,21 @@ def _log_submodels(eval_df, estimator, evaluator, probability_col, positive_inde
     return estimator
 
 
-
+def _get_scored():
+    try:
+            scored = model.transform(eval_df).select(
+                F.col(label_col).cast("int").alias(label_col),
+                F.col(probability_col).alias(probability_col)
+            )
+            if persist_eval:
+                scored.persist(StorageLevel.MEMORY_AND_DISK)
+            #DB
+            print("Transforming validation set")
+    except:
+        print(f"ERROR:{probability_col} not found in eval_df")
+        raise Exception(f"{probability_col} not found in eval_df")
+    
+    return scored
 
 
 # =========================================================
