@@ -799,6 +799,250 @@ def run_spark_cv_with_logging_spark_only(
             "tags": tags,
         }
 
+import mlflow
+import matplotlib.pyplot as plt
+from pyspark.sql import DataFrame
+import pyspark.sql.functions as F
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+from pyspark.storagelevel import StorageLevel
+
+# --------------------------------------------------------------------------
+# NOTE: This code assumes you have the following helper functions defined
+# in your environment, as they were in your original code:
+#
+# - _best_model(fitted_estimator)
+# - _positive_prob_col(scored_df, probability_col, positive_index)
+# - _metrics_at_threshold(scored_df, label_col, p_pos_col, threshold)
+# - _flatten_params(model)
+# - _tp_fp_fn_tn(scored_df, label_col, p_pos_col, threshold)
+# - _confusion_plot(tp, fp, fn, tn, title)
+# - _plot_and_log_curves(scored_df, label_col, p_pos_col, title_suffix)
+# --------------------------------------------------------------------------
+
+
+def fit_spark_model_and_log(
+    estimator,
+    train_df: DataFrame,
+    test_df: DataFrame,
+    val_df: DataFrame = None,
+    *,
+    label_col="label",
+    probability_col="probability",
+    positive_index=1,
+    thresholds=None,
+    run_name="spark-ml-experiment",
+    extra_tags=None,
+    additional_metrics=None,
+    log_confusion=True,
+    log_curves=True,
+):
+    """
+    Fits a Spark ML estimator, evaluates it, and logs all
+    results, parameters, and artifacts to MLflow.
+
+    This function will:
+    1.  Fit the estimator on `train_df`.
+    2.  Evaluate on `val_df` (if provided) or `test_df`.
+    3.  Find optimal thresholds for F1 and F2 on this eval set.
+    4.  Log metrics (AUCs, precision, recall, etc.) for the eval set.
+    5.  Log plots (Confusion Matrix, PR/ROC curves, Metrics vs. Threshold).
+    6.  If `val_df` was used, it performs a final evaluation on `test_df`
+        using the thresholds found in step 3, logging its metrics and plots.
+    """
+    
+    # --- Internal Helper Function ---
+    
+    def _evaluate_and_log_set(
+        model, 
+        df, 
+        set_name, 
+        find_thresholds=False, 
+        thresholds_to_use=None
+    ):
+        """
+        Internal helper to score a dataframe, find or apply thresholds,
+        and log all metrics and artifacts to MLflow for that set.
+        """
+        
+        # 1. Score and Persist
+        scored = model.transform(df).select(
+            F.col(label_col).cast("int").alias(label_col),
+            F.col(probability_col).alias(probability_col)
+        )
+        scored.persist(StorageLevel.MEMORY_AND_DISK)
+        
+        # We need the column of positive probability for our custom calcs
+        p_pos = _positive_prob_col(scored, probability_col, positive_index)
+        
+        # This view is used for most metric calculations
+        scored_plot = scored.select(F.col(label_col), p_pos.alias("p_pos"))
+
+        try:
+            # 2. Log Spark-native AUCs
+            evaluator = BinaryClassificationEvaluator(
+                labelCol=label_col, rawPredictionCol=probability_col
+            )
+            roc_auc = evaluator.evaluate(scored, {evaluator.metricName: "areaUnderROC"})
+            pr_auc = evaluator.evaluate(scored, {evaluator.metricName: "areaUnderPR"})
+            
+            metrics = {
+                f"{set_name}_area_under_roc": roc_auc,
+                f"{set_name}_area_under_pr": pr_auc
+            }
+
+            # 3. Find or Apply Thresholds
+            if find_thresholds:
+                # We are on the validation set, so we sweep thresholds
+                # to find the best ones.
+                threshold_list = []
+                f1_scores = []
+                f2_scores = []
+                best_f1, best_t_f1 = -1, 0.5
+                best_f2, best_t_f2 = -1, 0.5
+
+                for t in (thresholds or [i / 100 for i in range(1, 100)]):
+                    m = _metrics_at_threshold(scored_plot, label_col, F.col("p_pos"), t)
+                    
+                    threshold_list.append(t)
+                    f1_scores.append(m["f1"])
+                    f2_scores.append(m["f2"])
+
+                    if m["f1"] > best_f1: best_f1, best_t_f1 = m["f1"], t
+                    if m["f2"] > best_f2: best_f2, best_t_f2 = m["f2"], t
+                
+                # Log the metric vs. threshold plot
+                fig, ax = plt.subplots()
+                ax.plot(threshold_list, f1_scores, label="F1")
+                ax.plot(threshold_list, f2_scores, label="F2")
+                ax.axvline(best_t_f1, color="blue", linestyle="--", label=f"Best F1 (t={best_t_f1:.2f})")
+                ax.axvline(best_t_f2, color="orange", linestyle="--", label=f"Best F2 (t={best_t_f2:.2f})")
+                ax.set(xlabel="Threshold", ylabel="Score", title=f"Metrics vs. Threshold ({set_name})")
+                ax.legend()
+                plot_path = f"metrics_vs_threshold_{set_name}.png"
+                fig.savefig(plot_path, bbox_inches="tight")
+                mlflow.log_artifact(plot_path)
+                plt.close(fig)
+
+                # Define which thresholds to use for logging
+                thresholds_to_log = {"f1": best_t_f1, "f2": best_t_f2}
+                metrics[f"{set_name}_optimal_threshold_f1"] = best_t_f1
+                metrics[f"{set_name}_optimal_threshold_f2"] = best_t_f2
+            
+            else:
+                # We are on the test set, so we use the thresholds
+                # found previously.
+                thresholds_to_log = thresholds_to_use
+
+            # 4. Log Metrics at Optimal Thresholds
+            for name, thr in thresholds_to_log.items():
+                m = _metrics_at_threshold(scored_plot, label_col, F.col("p_pos"), thr)
+                metrics[f"{set_name}_{name}_precision"] = m["precision"]
+                metrics[f"{set_name}_{name}_recall"] = m["recall"]
+                metrics[f"{set_name}_{name}_f1"] = m["f1"]
+                metrics[f"{set_name}_{name}_accuracy"] = m["accuracy"]
+                
+                # 5. Log Confusion Matrix
+                if log_confusion:
+                    tp, fp, fn, tn = _tp_fp_fn_tn(scored_plot, label_col, F.col("p_pos"), thr)
+                    fig = _confusion_plot(tp, fp, fn, tn, f"Confusion Matrix @ {name.upper()} ({set_name})")
+                    path = f"cm_{set_name}_{name}.png"
+                    fig.savefig(path, bbox_inches="tight")
+                    mlflow.log_artifact(path)
+                    plt.close(fig)
+
+            # 6. Log Curves
+            if log_curves:
+                _plot_and_log_curves(scored_plot, label_col, "p_pos", f"({set_name})")
+
+            # 7. Log all metrics to MLflow
+            mlflow.log_metrics(metrics)
+            
+            # Return the found thresholds if this was the eval set
+            if find_thresholds:
+                return thresholds_to_log, metrics
+            
+            return None, metrics
+            
+        finally:
+            scored.unpersist()
+
+    # --- Main Function Logic ---
+    
+    # Set default thresholds if not provided
+    thresholds = thresholds or [i / 100 for i in range(1, 100)]
+    
+    # Determine which dataset to use for finding thresholds
+    eval_df = val_df if val_df is not None else test_df
+    eval_name = "validation" if val_df is not None else "test"
+    
+    run_metrics = {}
+    run_tags = {}
+
+    with mlflow.start_run(run_name=run_name) as run:
+        try:
+            # --- Fit and Log Model ---
+            fitted = estimator.fit(train_df)
+            model = _best_model(fitted)
+            mlflow.spark.log_model(model, artifact_path="spark_model")
+
+            # --- Log Params and Tags ---
+            mlflow.log_params(_flatten_params(model))
+            tags = {
+                "eval_set": eval_name,
+                "tuner": type(fitted).__name__,
+                "positive_index": str(positive_index),
+                "pipeline_type": model.__class__.__name__,
+            }
+            if extra_tags: 
+                tags.update(extra_tags)
+            mlflow.set_tags(tags)
+            run_tags = tags
+
+            # --- Evaluate on Validation (or Test) Set ---
+            # This call will find the best thresholds
+            found_thresholds, eval_metrics = _evaluate_and_log_set(
+                model, 
+                eval_df, 
+                eval_name, 
+                find_thresholds=True,
+                thresholds_to_use=None # Not applicable here
+            )
+            run_metrics.update(eval_metrics)
+
+            # --- Evaluate on Held-out Test Set ---
+            if val_df is not None:
+                # This call re-uses the thresholds found on the val set
+                _, test_metrics = _evaluate_and_log_set(
+                    model, 
+                    test_df, 
+                    "test", 
+                    find_thresholds=False,
+                    thresholds_to_use=found_thresholds
+                )
+                run_metrics.update(test_metrics)
+            
+            # --- Log Additional Metrics ---
+            if additional_metrics:
+                final_additional = {}
+                for k, v in additional_metrics.items():
+                    if isinstance(v, (int, float)): 
+                        final_additional[k] = float(v)
+                mlflow.log_metrics(final_additional)
+                run_metrics.update(final_additional)
+            
+            print(f"Run complete: {run.info.run_id}")
+            return {
+                "run_id": run.info.run_id, 
+                "metrics": run_metrics, 
+                "tags": run_tags
+            }
+            
+        except Exception as e:
+            print(f"Error during MLflow run: {e}")
+            # Optionally log exception to MLflow
+            mlflow.set_tag("run_status", "FAILED")
+            mlflow.log_param("run_error", str(e))
+            raise e
 
 '''
 def run_spark_ml_search(
