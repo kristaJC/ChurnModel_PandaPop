@@ -43,6 +43,8 @@ def _set_evaluator(estimator,
         #estimator.setEvaluator(evaluator)
         return estimator, evaluator
 
+
+
 def _best_model(estimator):
     if isinstance(estimator, (CrossValidatorModel, TrainValidationSplitModel)):
         return estimator.bestModel
@@ -160,7 +162,7 @@ def _binary_curves(df, label, prob):
                 auc_pr=float(bcm.areaUnderPR))
 
 
-def _plot_and_log_curves_old(df, label, prob, title_suffix):
+def _plot_and_log_curves(df, label, prob, title_suffix):
     curves = _binary_curves(df, label, prob)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -180,77 +182,6 @@ def _plot_and_log_curves_old(df, label, prob, title_suffix):
         fig.savefig(path, bbox_inches="tight"); mlflow.log_artifact(path); plt.close(fig)
     mlflow.log_metrics({"auc_roc": curves["auc_roc"], "auc_pr": curves["auc_pr"]})
 
-
-
-def _plt_binary(pts, auc, plot_type, title_suffix = ""):
-
-    if plot_type == "roc":
-        xlab, ylab = "FPR", "TPR"
-    if plot_type == "pr":
-        xlab,ylab= "Recall", "Precision"
-
-    fig, ax = plt.subplots()
-    if pts:
-        xs, ys = zip(*pts)
-        ax.plot(xs, ys, label=f"{plot_type.upper()} (AUC={auc:.3f})")
-    if type == "roc":
-        ax.plot([0, 1], [0, 1], "--", label="Random")
-    ax.set_xlabel(xlab) 
-    ax.set_ylabel(ylab)
-    ax.set_title(f"{plot_type.upper()} Curve {title_suffix}"); 
-    ax.legend()
-    
-    return fig
-
-
-def _get_curves(scored,label, prob, title_suffix=""):
-
-    curves_dict = _binary_curves(scored, label, prob,title_suffix)
-
-    pr_pts = curves_dict.get('pr_pts'),
-    auc_pr = curves_dict.get('auc_pr')
-    pr_curve =  _plt_binary(pr_pts, auc_pr,'pr')
-
-
-    roc_pts = curves_dict.get('roc_pts'), 
-    auc_roc = curves_dict.get('auc_roc'),
-    roc_curve = _plt_roc_curve(roc_pts, auc_roc,'roc')
-    
-    return pr_curve, roc_curve
-
-
-### HMMMM I am not sure this is working correctly.
-def _plot_and_log_curves(df, label, prob, title_suffix, base_path, evaluator_name=""):
-    curves = _binary_curves(df, label, prob)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    for name, (pts, auc, xlab, ylab) in {
-        "roc": (curves["roc"], curves["auc_roc"], "FPR", "TPR"),
-        "pr": (curves["pr"], curves["auc_pr"], "Recall", "Precision"),
-    }.items():
-        fig, ax = plt.subplots()
-        if pts:
-            xs, ys = zip(*pts)
-            ax.plot(xs, ys, label=f"{name.upper()} (AUC={auc:.3f})")
-        if name == "roc":
-            ax.plot([0, 1], [0, 1], "--", label="Random")
-        ax.set_xlabel(xlab); ax.set_ylabel(ylab)
-        ax.set_title(f"{name.upper()} Curve {title_suffix}"); ax.legend()
-        path = f"{base_path}{evaluator_name}_{name}_{ts}.png"
-        #fig.savefig(path, bbox_inches="tight");
-        print(f"Logging artifact {path}") 
-        mlflow.log_artifact(path); 
-        plt.close(fig)
-    
-    return curves #,maybe artifact
-    #mlflow.log_metrics({"auc_roc": curves["auc_roc"], "auc_pr": curves["auc_pr"]})
-
-
-
-def _plt_confusion_matrix(df, label, prob_expr, thr=0.5, title = "Confusion Matrix"):
-    tp, fp, fn, tn = _tp_fp_fn_tn(df, label, prob_expr, thr)
-
-    return _confusion_plot(tp, fp, fn, tn, title)
 
 # =========================================================
 # Main runner
@@ -378,7 +309,6 @@ def _log_single_fitted_estimator(eval_df,
                          estimator, # fitted estimator model
                          evaluator, 
                          probability_col, 
-                         label_col,
                          positive_index,
                          sub_model=False, # Flag to indicate if it is a submodel or not
                         ):
@@ -399,140 +329,32 @@ def _log_single_fitted_estimator(eval_df,
 
     # Get Metrics and log them
     scored = _get_scored(estimator, eval_df)
+    metrics = _calculate_metrics(scored, evaluator, probability_col, positive_index)
     p_pos = _positive_prob_col(scored, probability_col, positive_index)
-    
-    """ metrics = dict(
-        area_under_roc=roc_auc, 
-        area_under_pr=pr_auc,
-        optimal_threshold_f1=best_t_f1, 
-        optimal_threshold_f2=best_t_f2,
-        precision_at_f1=at_f1["precision"], 
-        recall_at_f1=at_f1["recall"],
-        f1_at_f1=at_f1["f1"], 
-        accuracy_at_f1=at_f1["accuracy"],
-        precision_at_f2=at_f2["precision"], 
-        recall_at_f2=at_f2["recall"],
-        f1_at_f2=at_f2["f1"], 
-        accuracy_at_f2=at_f2["accuracy"],
-        )
-    """
-    
-    #TODO: make sure this is working.
-    metrics = _calculate_metrics_good(scored,  p_pos, evaluator, probability_col, positive_index)
-    
-    params = {
+
+    mlflow.log_metrics(metrics, artifact_path= f"{metrics_base_path}metrics_{estimator.name}")
+    mlflow.log_params({
             "estimator": estimator.__class__.__name__,
             "estimator_params": estimator.getEstimatorParamMaps(),
             "evaluator": estimator.__class__.__name__,
             "evaluator_params": estimator.getParams(),
-        }
+        }, artifact_path=f"{params_base_path}params_{estimator.name}")
     
-
-    #Charts and curves: 
-    confusion_matrix = _plt_confusion_matrix(scored, 
-                                             label_col, 
-                                             probability_col,
-                                             threshold=0.5,
-                                             title=f'Confusion Matrix at default threshold=0.5')
-    confusion_matrix_f1 = _plt_confusion_matrix(scored,
-                                                label_col, 
-                                                probability_col, 
-                                                threshold = metrics['optimal_threshold_f1'],
-                                                title=f'Confusion Matrix at f1 threshold={metrics['optimal_threshold_f1']}')
-    confusion_matrix_f2 = _plt_confusion_matrix(scored,
-                                                label_col, 
-                                                probability_col, 
-                                                threshold = metrics['optimal_threshold_f2'],
-                                                title=f'Confusion Matrix at f2 threshold={metrics['optimal_threshold_f2']}')
-    
-    ## PR and ROC curves
-    pr_curve, roc_curve = _get_curves(scored,label_col, probability_col, title_suffix="")
+    ##TODO: Set this up to logo appropriately.
+    _plot_all_charts(estimator, 
+        scored, 
+        evaluator, 
+        probability_col, 
+        positive_index,
+        model_base_path,
+        plot_base_path,
+        metric_base_path,
+        params_base_path
+        )
 
 
-    ###### MLFlow logging 
-    mlflow.log_metrics(metrics, artifact_path= f"{metrics_base_path}metrics_{estimator.name}")
-    mlflow.log_params(params, artifact_path=f"{params_base_path}params_{estimator.name}")
-    
-    
-    ##log confusion matrixes,
-    mlflow.log_artifact(confusion_matrix, 
-                        artifact_path=f"{plot_base_path}confusion_matrix_{estimator.name}")
-    mlflow.log_artifact(confusion_matrix_f1, 
-                        artifact_path=f"{plot_base_path}confusion_matrix_f1_{estimator.name}")
-    mlflow.log_artifact(confusion_matrix_f2,
-                       artifact_path=f"{plot_base_path}confusion_matrix_f2_{estimator.name}")
-    
-    ## log pr_curve and recall
-    mlflow.log_artifact(pr_curve,
-                        artifact_path=f"{plot_base_path}pr_curve_{estimator.name}")
-    mlflow.log_artifact(roc_curve,
-                        artifact_path=f"{plot_base_path}roc_curve_{estimator.name}")
 
-
-    return estimator
-
-def _log_model_submodels_new(eval_df, 
-                         estimator, # fitted estimator model
-                         evaluator, 
-                         probability_col, 
-                         label_col,
-                         positive_index,
-                         collect_submodels=False):
-
-    """
-        Helper function to get and log all of the submodels trained for a CV pipeline; Best model is the parent model.
-        If not cv, just logs the estimator model and returns the estimator
-    """
-
-    """
-    
-    _log_single_fitted_estimator(eval_df, 
-                            estimator, # fitted estimator model
-                            evaluator, 
-                            probability_col, 
-                            label_col,
-                            positive_index,
-                            sub_model=False, # Flag to indicate if it is a submodel or not
-                            ):
-
-    """
-
-
-    sub_models = []
-
-    if isinstance(estimator, (CrossValidatorModel, TrainValidationSplitModel)):
-        if collect_submodels:
-            sub_models = estimator.subModels
-        estimator = _best_model(estimator)
-
-
-    estimator = _log_single_fitted_estimator(eval_df, 
-                            estimator, # fitted estimator model
-                            evaluator, 
-                            probability_col, 
-                            label_col,
-                            positive_index,
-                            sub_model=False, # Flag to indicate if it is a submodel or not
-                        )
-
-
-    # For each submodel - log them separetly in the submodels directory
-    if collect_submodels:
-        for sub_model in sub_models:
-
-            estimator = _log_single_fitted_estimator(eval_df, 
-                            estimator, # fitted estimator model
-                            evaluator, 
-                            probability_col, 
-                            label_col,
-                            positive_index,
-                            sub_model=True, # Flag to indicate if it is a submodel or not
-                        )
-        
-    return estimator
-
-
-def _log_model_submodels_old(eval_df, 
+def _log_model_submodels(eval_df, 
                          estimator, # fitted estimator model
                          evaluator, 
                          probability_col, 
@@ -594,42 +416,6 @@ def _log_model_submodels_old(eval_df,
     return estimator
 
 
-def _calculate_metrics_good(scored, p_pos, evaluator, probability_col, positive_index):
-
-    #p_pos = _positive_prob_col(scored, probability_col, positive_index)
-
-    # Get 
-    roc_auc = evaluator.evaluate(scored, {evaluator.metricName: "areaUnderROC"})
-    pr_auc = evaluator.evaluate(scored, {evaluator.metricName: "areaUnderPR"})
-
-    best_f1, best_t_f1 = -1, 0.5
-    best_f2, best_t_f2 = -1, 0.5
-    for t in thresholds:
-        m = _metrics_at_threshold(scored, label_col, p_pos, t)
-
-        metrics_at_thresh = {f"f1@{t:.2f}": m["f1"], f"f2@{t:.2f}": m["f2"]}
-        if m["f1"] > best_f1: best_f1, best_t_f1 = m["f1"], t
-        if m["f2"] > best_f2: best_f2, best_t_f2 = m["f2"], t
-
-    at_f1 = _metrics_at_threshold(scored, label_col, p_pos, best_t_f1)
-    at_f2 = _metrics_at_threshold(scored, label_col, p_pos, best_t_f2)
-
-    metrics = dict(
-        area_under_roc=roc_auc, 
-        area_under_pr=pr_auc,
-        optimal_threshold_f1=best_t_f1, 
-        optimal_threshold_f2=best_t_f2,
-        precision_at_f1=at_f1["precision"], 
-        recall_at_f1=at_f1["recall"],
-        f1_at_f1=at_f1["f1"], 
-        accuracy_at_f1=at_f1["accuracy"],
-        precision_at_f2=at_f2["precision"], 
-        recall_at_f2=at_f2["recall"],
-        f1_at_f2=at_f2["f1"], 
-        accuracy_at_f2=at_f2["accuracy"],
-        )
-    return metrics
-
 def _calculate_metrics_old(scored, evaluator, probability_col, positive_index):
 
     p_pos = _positive_prob_col(scored, probability_col, positive_index)
@@ -649,7 +435,6 @@ def _calculate_metrics_old(scored, evaluator, probability_col, positive_index):
 
     at_f1 = _metrics_at_threshold(scored, label_col, p_pos, best_t_f1)
     at_f2 = _metrics_at_threshold(scored, label_col, p_pos, best_t_f2)
-
     metrics = dict(
         area_under_roc=roc_auc, 
         area_under_pr=pr_auc,
@@ -668,7 +453,7 @@ def _calculate_metrics_old(scored, evaluator, probability_col, positive_index):
     return metrics
 
 
-def _calculate_metrics_old_older(scored, evaluator, probability_col, positive_index):
+def _calculate_metrics_old(scored, evaluator, probability_col, positive_index):
 
     p_pos = _positive_prob_col(scored, probability_col, positive_index)
 
