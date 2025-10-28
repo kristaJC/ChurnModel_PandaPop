@@ -699,14 +699,18 @@ def run_spark_ml_training(
             mlflow.set_tags(tags)
             raise
 
-        #_log_model_submodels(eval_df, 
-        #                 estimator, # fitted estimator model
-        #                 evaluator, 
-        #                 probability_col, 
-        #                 label_col,
-        #                 positive_index,
-        #                 collect_submodels=True,
-        #                 validation_flag = False,thresholds=thresholds)
+        try:
+            _log_model_submodels(eval_df, 
+                            estimator, # fitted estimator model
+                            evaluator, 
+                            probability_col, 
+                            label_col,
+                            positive_index,
+                            collect_submodels=True,
+                            validation_flag = False,thresholds=thresholds)
+        except:
+            print("Could not log submodels")
+            pass 
 
 
         if val_df is not None:
