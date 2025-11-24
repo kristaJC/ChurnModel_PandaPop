@@ -6,6 +6,7 @@ from pyspark.ml.evaluation import BinaryClassificationEvaluator
 from pyspark.ml.linalg import DenseVector, SparseVector, VectorUDT
 from pyspark.ml.feature import VectorAssembler, StandardScaler, Imputer
 from pyspark.ml.classification import LogisticRegression, GBTClassifier
+from xgboost.spark import SparkXGBClassifier, SparkXGBRegressor
 from pyspark.storagelevel import StorageLevel
 from datetime import datetime
 import matplotlib.pyplot as plt
@@ -501,6 +502,32 @@ def _log_model_submodels(eval_df,
                         )"""
     
     return 
+
+
+# not tested
+def _get_feature_importances(estimator):
+
+    features=None
+    last_estimator = None
+    input_cols = None
+    feature_importances = None
+    if isinstance(estimator,PipelineModel):
+        last_estimator = estimator.stages[-1]
+        if isinstance(estimator.stages[-2], VectorAssembler):
+            input_cols = estimator.stages[-2].getInputCols() # must be the vector assembler before the last estimator
+        else:
+            return features
+    if isinstance(last_estimator, SparkXGBClassifier):
+        feature_importances = last_estimator.get_feature_importances()
+
+    if feature_importances and input_cols:
+        named_feature_importances = list(zip(input_cols, feature_importances.values()))
+        features = pd.DataFrame(named_feature_importances, columns=['feature_name','feature_importance']).sort_values(by='feature_importance', ascending=False)#.head(20)
+        ###
+
+    return features
+
+
 
 
 
