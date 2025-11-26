@@ -19,7 +19,9 @@ def undersample_majority(
     majority_label: Optional[Any] = None,
     ratio: float = 1.0,
     strategy: str = "sample",      # "sample" (fast, approx) or "limit" (exact)
-    seed: int = 42
+    seed: int = 42,
+    split = None,
+    sampling = 'undersample',
 ) -> Tuple[DataFrame, Dict[str, Any]]:
     """
     Undersample the majority class in a binary-labeled Spark DataFrame.
@@ -65,7 +67,9 @@ def undersample_majority(
             "counts_before": counts,
             "counts_after": counts,
             "target_majority": target_maj,
-            "strategy": "none"
+            "strategy":None,
+            "sampling":None,
+            "split":None
         }
 
     # Split
@@ -98,7 +102,9 @@ def undersample_majority(
         "counts_after": after_counts,
         "target_majority": target_maj,
         "achieved_ratio": after_counts.get(majority_label, 0) / float(after_counts.get(minority_label, 1)),
-        "strategy": strategy
+        "sampling":sampling,
+        "strategy":strategy,
+        "split":split
     }
     return balanced, info
 
@@ -110,7 +116,9 @@ def upsample_minority(
     majority_label: Optional[Any] = None,
     ratio: float = 1.0,         # desired majority:minority AFTER oversampling (e.g., 1.0 => 1:1)
     strategy: str = "sample",   # "sample" (fast, approx) or "limit" (exact)
-    seed: int = 42
+    seed: int = 42,
+    split: int = None,
+    sampling: str = "upsample",
 ) -> Tuple[DataFrame, Dict[str, Any]]:
     """
     Randomly oversample the minority class in a binary-labeled Spark DataFrame until
@@ -167,7 +175,9 @@ def upsample_minority(
             "counts_before": counts,
             "counts_after": counts,
             "target_minority": min_n,
-            "strategy": "none"
+            "sampling":None,
+            "strategy": None,
+            "split":split
         }
 
     # --- Split
@@ -212,7 +222,9 @@ def upsample_minority(
         "counts_after": after_counts,
         "target_minority": target_min,
         "achieved_ratio": after_counts.get(majority_label, 0) / float(after_counts.get(minority_label, 1)),
-        "strategy": strategy
+        "sampling":sampling,
+        "strategy": strategy,
+        "split":split,
     }
     return balanced, info
 
