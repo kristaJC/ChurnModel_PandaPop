@@ -9,6 +9,7 @@ from pyspark.ml.classification import LogisticRegression, GBTClassifier
 from xgboost.spark import SparkXGBClassifier, SparkXGBRegressor
 from pyspark.storagelevel import StorageLevel
 from datetime import datetime
+from matplotlib import colormaps
 import matplotlib.pyplot as plt
 import mlflow
 import pandas as pd
@@ -136,6 +137,22 @@ def _manual_roc_curve(df, label_col, score_col, n_points=100):
     return points
 
 
+### Manually create the Precision Recall points over range of thresholds
+def _manual_pr_curve(df, label, prob_expr,n_points = 100):
+
+    thresholds = [i / n_points for i in range(n_points + 1)]
+    pr_pts = []
+    for thr in thresholds:
+        ret_dict = _metrics_at_threshold(df, label, prob_expr, thr)
+        p,r = ret_dict["precision"], ret_dict["recall"]
+        pr_pts.append((float(r),float(p)))
+        
+    return pr_pts
+
+
+
+
+
 # =========================================================
 # Curves (Spark compute → matplotlib)
 # =========================================================
@@ -153,7 +170,7 @@ def _binary_curves(df, label, prob):
         pr_pts  = [(float(x), float(y)) for x, y in bcm.pr().collect()]
     else:  # Spark ≥3.5
         roc_pts = _manual_roc_curve(df, label, prob)
-        pr_pts  = []  # PR opcional
+        pr_pts  = _manual_pr_curve(df,label, prob)  # PR opcional
 
     return dict(roc=roc_pts, pr=pr_pts,
                 auc_roc=float(bcm.areaUnderROC),
@@ -421,6 +438,12 @@ def _log_parent_best_and_tuner(fitted, *, num_folds=None):
 
     # log best once at stable path
     mlflow.spark.log_model(best, artifact_path="models/best_model")
+    
+    #TODO:
+    #feature_importances_df = _get_feature_importances(best)
+    #feature_importances_fig = _plt_feature_importances(feature_importances_df)
+    #mlflow.log_figure(feature_importances_fig, "feature_importances.png")
+    #mlflow.log_dict(feature_importances, "feature_importances.json")
 
     # tuner summary (version-tolerant; no .parent)
     tuner_info = {"tuner_type": type(fitted).__name__}
@@ -452,6 +475,8 @@ def _log_parent_best_and_tuner(fitted, *, num_folds=None):
         if num_folds is not None:
             tuner_info["numFolds"] = int(num_folds)
 
+
+    #mlflow.log_dict(,"")
     mlflow.log_dict(tuner_info, "tuner/summary.json")
     mlflow.log_params(_flatten_params(best))
     return best
@@ -504,31 +529,77 @@ def _log_model_submodels(eval_df,
     return 
 
 
+
+    
+def _plt_feature_importances(df):
+
+    if df is None:
+        return None
+    
+    my_cmap = plt.get_cmap("viridis")
+
+    rescale = lambda y: (y - np.min(y)) / (np.max(y) - np.min(y))
+
+    fig, ax = plt.subplots()
+    plt.barh(df.index, df['feature_importances'], color=my_cmap(rescale(df['feature_importances'])))
+    ax.set_title("XGBoost Feature Importances")
+    ax.set_ylabel("Feature Name")
+    plt.xlabel("Feature Importance")
+    fig.tight_layout()
+
+    return fig
+
 # not tested
 def _get_feature_importances(estimator):
 
-    features=None
-    last_estimator = None
-    input_cols = None
-    feature_importances = None
+    def _get_feature_importances_df(input_cols, feature_importances, top_n = 20):
+
+        df = pd.DataFrame(list(zip(estimator.stages[-2].getInputCols(),estimator.stages[-1].get_feature_importances().values())), columns = ['features','feature_importances']).set_index('features').sort_values('feature_importances', ascending=False).head(top_n)
+
+        return df 
+
+    feature_importances = []
+    input_cols = []
+
     if isinstance(estimator,PipelineModel):
-        last_estimator = estimator.stages[-1]
+        if isinstance(estimator.stages[-1], SparkXGBClassifier):
+            feature_importances = estimator.stages[-1].get_feature_importances().values()
+        else:
+            print('Cannot get feature importance for this estimator because it is not a SparkXGBClassifier')
+            return None
         if isinstance(estimator.stages[-2], VectorAssembler):
             input_cols = estimator.stages[-2].getInputCols() # must be the vector assembler before the last estimator
         else:
-            return features
-    if isinstance(last_estimator, SparkXGBClassifier):
-        feature_importances = last_estimator.get_feature_importances()
+            print('Cannot get input columns for this estimator because it is not a Vector Assembler')
+            return None
+    else:
+        print('Cannot proceed because the model is not a PipelineModel')
+        return None
 
-    if feature_importances and input_cols:
-        named_feature_importances = list(zip(input_cols, feature_importances.values()))
-        features = pd.DataFrame(named_feature_importances, columns=['feature_name','feature_importance']).sort_values(by='feature_importance', ascending=False)#.head(20)
-        ###
+    if len(feature_importances)>0 and len(input_cols)>0:
+        features = _get_feature_importances_df(input_cols, feature_importances, top_n = 20)
+    else:
+        print('Cannot create feature importance df because either feature_importances or input_cols is empty')
+        return None
 
     return features
 
+"""
+def _plt_feature_importances_fig_old(df, top_n=20):
 
+    df = df.head(top_n)
 
+    features = pd.Series(df['feature_importances'], index=df['feature_name'])
+
+    fig,ax = plt.subplots()
+    features.plot.barh(ax=ax)
+    ax.set_title("XGBoost Feature Importances")
+    ax.set_ylabel("Feature Name")
+    plt.xlabel("Feature Importance")
+
+    return fig
+
+"""
 
 
 def _calculate_metrics(scored, label_col, probability_col, evaluator, thresholds, positive_index):
@@ -587,6 +658,9 @@ def _get_scored(model, eval_df, label_col, probability_col, persist_eval=True):
     return scored
 
 
+#def _plt_feature_importances(features):
+    
+
 
 def _log_single_fitted_estimator(eval_df,
                                  estimator,  # fitted PipelineModel or Model
@@ -633,6 +707,14 @@ def _log_single_fitted_estimator(eval_df,
     scored_for_curves = scored.withColumn("_p", p_pos)
     pr_curve, roc_curve = _get_curves(scored_for_curves, label_col, "_p")
 
+    #TODO: TEST
+    ### Feature importances
+    features = _get_feature_importances(estimator)
+    if features is not None:
+        features_importance_fig = _plt_feature_importances(features)
+        if features_importance_fig is not None:
+            mlflow.log_figure(features_importance_fig, f"{plot_base_path}feature_importances.png")
+   
     mlflow.log_metrics(metrics)
     mlflow.log_dict(params, f"{params_base_path}params_{getattr(estimator,'uid','model')}.json")
     mlflow.log_figure(confusion_matrix,   f"{plot_base_path}confusion_default.png")
@@ -640,6 +722,13 @@ def _log_single_fitted_estimator(eval_df,
     mlflow.log_figure(confusion_matrix_f2, f"{plot_base_path}confusion_at_f2.png")
     mlflow.log_figure(pr_curve,            f"{plot_base_path}pr_curve.png")
     mlflow.log_figure(roc_curve,           f"{plot_base_path}roc_curve.png")
+
+    #TODO: Test
+    #mlflow.log_figure(features_importance_fig, f"{plot_base_path}feature_importances.png")
+
+    #mlflow.spark.log_model(spark_model=cvModel.bestModel, artifact_path="spark-crossvalidator-model")
+    # If logging the entire CrossValidatorModel for its metrics/submodels:
+    # mlflow.spark.log_model(spark_model=cvModel, artifact_path="spark-crossvalidator")
     return estimator
 
 
@@ -665,10 +754,13 @@ def run_spark_ml_training(
         persist_eval=True,
         log_confusion=True,
         log_curves=True,
-        collect_submodels=True,
+        collect_submodels=False,
         eval_metric = "areaUnderPR"
     ):
     
+    # new
+    if extra_tags:
+        run_name = f"XGB_date_interval_{extra_tags['date_interval']}_{extra_tags['split']}_churnlabel_{extra_tags['label']}_sampling_{extra_tags['sampling']}"
 
     thresholds = thresholds or [i / 100 for i in range(1, 100)]
     eval_df = val_df if val_df is not None else test_df
@@ -690,7 +782,7 @@ def run_spark_ml_training(
             num_folds = estimator.getNumFolds() if isinstance(estimator, CrossValidator) else None
 
             print("Fitting model...")
-            fitted = estimator.fit(train_df)
+            fitted = estimator.fit(train_df) # Fitted is the fitted CrossValidator flag
             print("Done Fitting Model...")
 
             best = _log_parent_best_and_tuner(fitted, num_folds=num_folds)
@@ -699,7 +791,7 @@ def run_spark_ml_training(
             tags.update({"run_id": run.info.run_id, "error": "Error in fitting", "status": "error"})
             mlflow.set_tags(tags)
             raise
-
+        
         try:
             estimator = _log_single_fitted_estimator(
                 eval_df, best, evaluator, probability_col, label_col, positive_index,
@@ -722,10 +814,10 @@ def run_spark_ml_training(
             mlflow.set_tags(tags)
 
         except Exception as e:
-            tags.update({"run_id": run.info.run_id, "error": "Error in training", "status": "error"})
+            tags.update({"run_id": run.info.run_id, "error": "Error in logging", "status": "error"})
             mlflow.set_tags(tags)
             raise
-
+        """
         try:
             _log_model_submodels(eval_df, 
                             estimator, # fitted estimator model
@@ -738,7 +830,7 @@ def run_spark_ml_training(
         except:
             print("Could not log submodels")
             pass 
-
+        """
 
         if val_df is not None:
             _ = _log_single_fitted_estimator(
@@ -747,53 +839,7 @@ def run_spark_ml_training(
             )
 
     print(f"Run complete: {run.info.run_id}")
-    return {**tags, "status": "success"}
+    return {**tags, "status": "success"}, best
 
 
-    """
-            # >>> INSERT: log ONLY the parent best model + tuner summary here
-            best = _log_parent_best_and_tuner(fitted)  # <--- this replaces any other model logging
-            # <<<
-
-        except Exception as e:
-            tags.update({"run_id": run.info.run_id, "error": "Error in fitting", "status": "error"})
-            mlflow.set_tags(tags)
-            raise  # or return tags
-
-        try:
-            print("Logging metrics/figures")
-            # use your existing helper but REMOVE any mlflow.spark.log_model() inside it
-            # (it should compute metrics/plots only)
-            _ = _log_single_fitted_estimator(
-                eval_df, best, evaluator, probability_col, label_col, positive_index,
-                sub_model=False, validation_flag=False
-            )
-
-            # MLflow tags (params already logged in _log_parent_best_and_tuner)
-            tags.update({
-                "run_id": run.info.run_id,
-                "pipeline_type": best.__class__.__name__,
-                "tuner": type(fitted).__name__,
-                "eval_set": eval_name,
-                "positive_index": str(positive_index),
-            })
-            if extra_tags:
-                tags.update(extra_tags)
-            mlflow.set_tags(tags)
-
-        except Exception as e:
-            tags.update({"run_id": run.info.run_id, "error": "Error in training", "status": "error"})
-            mlflow.set_tags(tags)
-            raise  # or return tags
-
-    # --- Optional: validation artifacts (no model logging here) ---
-    if val_df is not None:
-        _ = _log_single_fitted_estimator(
-            val_df, best, evaluator, probability_col, label_col, positive_index,
-            sub_model=False, validation_flag=True
-        )
-
-    print(f"Run complete: {run.info.run_id}")
-    return {**tags, "status": "success"}
-"""
     

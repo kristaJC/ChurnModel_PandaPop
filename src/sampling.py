@@ -12,6 +12,99 @@ from pyspark.ml.feature import BucketedRandomProjectionLSH
 import math
 import random
 
+#TODO: Test
+def get_stratified_sets(df, 
+                        upsample=True,
+                        undersample=True, 
+                        split=None,
+                        P_TEST = 0.2, 
+                        P_VAL=0.2,):
+
+    # Start with simple stratified sampling... 
+    strat_train, strat_val, strat_test = stratified_sampling(df, P_TEST, P_VAL)
+
+
+    """     
+    train_info_base = {
+                            'sampling':'stratified', 
+                            'split':split,
+                            'P_TEST':P_TEST,
+                            'P_VAL':P_VAL,
+                            'P_TRAIN':1.0 - P_TEST-P_VAL,
+                            'strategy':None}
+    """     
+                        
+    all_sets = []
+    all_sets.append({'dataset': strat_train,
+                    'dataset_info':{
+                            'sampling':'stratified', 
+                            'split':split,
+                            'P_TEST':P_TEST,
+                            'P_VAL':P_VAL,
+                            'P_TRAIN':1.0 - P_TEST-P_VAL,
+                            'strategy':None,
+                            'type':'training'
+                        },
+                'relevant_test_set': strat_test,
+                'relevant_val_set': strat_val})
+
+
+    if upsample:
+        strat_train_up, train_info_up = upsample_minority(strat_train, split= split)
+        #return_dict['dataset'] = strat_train
+        return_dict = {**train_info_up, 'sampling':'upsample', 'split':split,'type':'training'}
+        all_sets.append({'dataset': strat_train_up,
+                'dataset_info': return_dict,
+                'relevant_test_set': strat_test,
+                'relevant_val_set': strat_val
+        })
+    if undersample:
+        strat_train_under, train_info_under = undersample_majority(strat_train, split= split)
+        return_dict = {**train_info_under, 'sampling':'undersample', 'split':split,'type':'training'}
+        all_sets.append({'dataset': strat_train_under,
+                    'dataset_info': return_dict,
+                    'relevant_test_set': strat_test,
+                    'relevant_val_set': strat_val
+        })
+    
+
+    ## Returns a list of dictionaries with [{for stratified set, split dependent},{opt. upsampled},{opt.downsampled}]
+    return all_sets
+
+
+
+
+
+
+def stratified_sampling(df, 
+                        P_TEST=0.2, 
+                        P_VAL=0.2):
+
+
+    # 1) Work at the ID level to avoid row overlaps/leakage
+    ids = df.select('judi', 'label').distinct()
+
+    # 2) Assign a stratified rank within each label using a stable random
+    ids = ids.withColumn('u', F.rand(42))
+    w = Window.partitionBy('label').orderBy(F.col('u'))
+    ids = ids.withColumn('pr', F.percent_rank().over(w))
+
+    # 3) Map percent-rank to splits (per class)
+    ids = ids.withColumn(
+        'split',
+        F.when(F.col('pr') < P_TEST, F.lit('test'))
+        .when(F.col('pr') < P_TEST + P_VAL, F.lit('val'))
+        .otherwise(F.lit('train'))
+    ).select('judi', 'split')
+
+    # 4) Materialize the three sets (still imbalanced, as in reality)
+    strat_train = df.join(ids.filter("split = 'train'"), on='judi', how='inner')
+    strat_val  = df.join(ids.filter("split = 'val'"),   on='judi', how='inner')
+    strat_test  = df.join(ids.filter("split = 'test'"),  on='judi', how='inner')
+
+    return strat_train, strat_val, strat_test
+
+
 
 def undersample_majority(
     df: DataFrame,
@@ -228,7 +321,7 @@ def upsample_minority(
     }
     return balanced, info
 
-
+"""
 
 def _vec_add(a: DenseVector, b: DenseVector):
     return DenseVector([x + y for x, y in zip(a, b)])
@@ -350,38 +443,12 @@ def smote_oversample_spark(
         "max_pairs_dist": max_pairs_dist,
         "method": "LSH-SMOTE (approx)",
     }
+"""
 
 
 
-def stratified_sampling(df, 
-                        P_TEST=0.2, 
-                        P_VAL=0.2):
 
-
-    # 1) Work at the ID level to avoid row overlaps/leakage
-    ids = df.select('judi', 'label').distinct()
-
-    # 2) Assign a stratified rank within each label using a stable random
-    ids = ids.withColumn('u', F.rand(42))
-    w = Window.partitionBy('label').orderBy(F.col('u'))
-    ids = ids.withColumn('pr', F.percent_rank().over(w))
-
-    # 3) Map percent-rank to splits (per class)
-    ids = ids.withColumn(
-        'split',
-        F.when(F.col('pr') < P_TEST, F.lit('test'))
-        .when(F.col('pr') < P_TEST + P_VAL, F.lit('val'))
-        .otherwise(F.lit('train'))
-    ).select('judi', 'split')
-
-    # 4) Materialize the three sets (still imbalanced, as in reality)
-    strat_train = df.join(ids.filter("split = 'train'"), on='judi', how='inner')
-    strat_val  = df.join(ids.filter("split = 'val'"),   on='judi', how='inner')
-    strat_test  = df.join(ids.filter("split = 'test'"),  on='judi', how='inner')
-
-    return strat_train, strat_val, strat_test
-
-
+'''
 def sample(
     df: DataFrame,
     undersample = True,
@@ -416,5 +483,5 @@ def sample(
         train_info_over = None
 
     return strat_train, strat_val, strat_test, strat_train_under, strat_train_over, train_info_under, train_info_over
-
+'''
     

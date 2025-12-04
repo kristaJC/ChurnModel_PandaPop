@@ -15,7 +15,7 @@ import pandas as pd
 
 import mlflow.spark
 
-'''
+
 # =========================================================
 # Helpers
 # =========================================================
@@ -525,9 +525,35 @@ def _get_feature_importances(estimator):
         features = pd.DataFrame(named_feature_importances, columns=['feature_name','feature_importance']).sort_values(by='feature_importance', ascending=False)#.head(20)
         ###
 
+
     return features
 
 
+def _plt_feature_importances_fig(df, top_n=20):
+
+    df = df.head(top_n)
+
+    features = pd.Series(df['feature_importances'], index=df['feature_name'])
+
+    fig,ax = plt.subplots()
+    features.plot.barh(ax=ax)
+    ax.set_title("XGBoost Feature Importances")
+    ax.set_ylabel("Feature Name")
+    plt.xlabel("Feature Importance")
+
+    return fig
+
+# 4. Plot the feature importances
+#plt.subplots()
+#fig = plt.figure(figsize=(10, 8))
+#plt.barh(features_df['feature_name'], features_df['feature_importance'])
+#plt.xlabel("Feature Importance")
+#plt.ylabel("Feature Name")
+#plt.title("XGBoost Feature Importances")
+#plt.tight_layout()
+#plt.show()
+
+#return fig
 
 
 
@@ -587,7 +613,6 @@ def _get_scored(model, eval_df, label_col, probability_col, persist_eval=True):
     return scored
 
 
-
 def _log_single_fitted_estimator(eval_df,
                                  estimator,  # fitted PipelineModel or Model
                                  evaluator,
@@ -633,6 +658,11 @@ def _log_single_fitted_estimator(eval_df,
     scored_for_curves = scored.withColumn("_p", p_pos)
     pr_curve, roc_curve = _get_curves(scored_for_curves, label_col, "_p")
 
+    #TODO: TEST
+    ### Feature importances
+    features = _get_feature_importances(estimator)
+    features_importance_fig = _plt_feature_importances_fig(features)
+
     mlflow.log_metrics(metrics)
     mlflow.log_dict(params, f"{params_base_path}params_{getattr(estimator,'uid','model')}.json")
     mlflow.log_figure(confusion_matrix,   f"{plot_base_path}confusion_default.png")
@@ -640,8 +670,15 @@ def _log_single_fitted_estimator(eval_df,
     mlflow.log_figure(confusion_matrix_f2, f"{plot_base_path}confusion_at_f2.png")
     mlflow.log_figure(pr_curve,            f"{plot_base_path}pr_curve.png")
     mlflow.log_figure(roc_curve,           f"{plot_base_path}roc_curve.png")
+
+    #TODO: Test
+    mlflow.log_figure(features_importance_fig, f"{plot_base_path}feature_importances.png")
+
+    #mlflow.spark.log_model(spark_model=cvModel.bestModel, artifact_path="spark-crossvalidator-model")
+    # If logging the entire CrossValidatorModel for its metrics/submodels:
+    # mlflow.spark.log_model(spark_model=cvModel, artifact_path="spark-crossvalidator")
     return estimator
-'''
+
 
 from pyspark.sql import SparkSession
 spark = SparkSession.builder.getOrCreate()
@@ -665,10 +702,13 @@ def run_spark_ml_training(
         persist_eval=True,
         log_confusion=True,
         log_curves=True,
-        collect_submodels=True,
+        collect_submodels=False,
         eval_metric = "areaUnderPR"
     ):
     
+    # new
+    if extra_tags:
+        run_name = f"XGB_date_interval_{extra_tags['date_interval']}_{extra_tags['split']}_churnlabel_{extra_tags['label']}_sampling_{extra_tags['sampling']}"
 
     thresholds = thresholds or [i / 100 for i in range(1, 100)]
     eval_df = val_df if val_df is not None else test_df
@@ -699,7 +739,7 @@ def run_spark_ml_training(
             tags.update({"run_id": run.info.run_id, "error": "Error in fitting", "status": "error"})
             mlflow.set_tags(tags)
             raise
-
+        
         try:
             estimator = _log_single_fitted_estimator(
                 eval_df, best, evaluator, probability_col, label_col, positive_index,
@@ -722,10 +762,10 @@ def run_spark_ml_training(
             mlflow.set_tags(tags)
 
         except Exception as e:
-            tags.update({"run_id": run.info.run_id, "error": "Error in training", "status": "error"})
+            tags.update({"run_id": run.info.run_id, "error": "Error in logging", "status": "error"})
             mlflow.set_tags(tags)
             raise
-
+        """
         try:
             _log_model_submodels(eval_df, 
                             estimator, # fitted estimator model
@@ -738,7 +778,7 @@ def run_spark_ml_training(
         except:
             print("Could not log submodels")
             pass 
-
+        """
 
         if val_df is not None:
             _ = _log_single_fitted_estimator(
@@ -747,53 +787,7 @@ def run_spark_ml_training(
             )
 
     print(f"Run complete: {run.info.run_id}")
-    return {**tags, "status": "success"}
+    return {**tags, "status": "success"}, best
 
 
-    """
-            # >>> INSERT: log ONLY the parent best model + tuner summary here
-            best = _log_parent_best_and_tuner(fitted)  # <--- this replaces any other model logging
-            # <<<
-
-        except Exception as e:
-            tags.update({"run_id": run.info.run_id, "error": "Error in fitting", "status": "error"})
-            mlflow.set_tags(tags)
-            raise  # or return tags
-
-        try:
-            print("Logging metrics/figures")
-            # use your existing helper but REMOVE any mlflow.spark.log_model() inside it
-            # (it should compute metrics/plots only)
-            _ = _log_single_fitted_estimator(
-                eval_df, best, evaluator, probability_col, label_col, positive_index,
-                sub_model=False, validation_flag=False
-            )
-
-            # MLflow tags (params already logged in _log_parent_best_and_tuner)
-            tags.update({
-                "run_id": run.info.run_id,
-                "pipeline_type": best.__class__.__name__,
-                "tuner": type(fitted).__name__,
-                "eval_set": eval_name,
-                "positive_index": str(positive_index),
-            })
-            if extra_tags:
-                tags.update(extra_tags)
-            mlflow.set_tags(tags)
-
-        except Exception as e:
-            tags.update({"run_id": run.info.run_id, "error": "Error in training", "status": "error"})
-            mlflow.set_tags(tags)
-            raise  # or return tags
-
-    # --- Optional: validation artifacts (no model logging here) ---
-    if val_df is not None:
-        _ = _log_single_fitted_estimator(
-            val_df, best, evaluator, probability_col, label_col, positive_index,
-            sub_model=False, validation_flag=True
-        )
-
-    print(f"Run complete: {run.info.run_id}")
-    return {**tags, "status": "success"}
-"""
     
