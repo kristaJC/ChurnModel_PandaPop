@@ -316,32 +316,21 @@ def _log_single_fitted_estimator(eval_df,
     # Get Metrics and log them
     scored = _get_scored(estimator, eval_df,label_col, probability_col,persist_eval = True)
     p_pos = _positive_prob_col(scored, probability_col, positive_index)
-    
-    """ 
-        metrics = dict(
-        area_under_roc=roc_auc, 
-        area_under_pr=pr_auc,
-        optimal_threshold_f1=best_t_f1, 
-        optimal_threshold_f2=best_t_f2,
-        precision_at_f1=at_f1["precision"], 
-        recall_at_f1=at_f1["recall"],
-        f1_at_f1=at_f1["f1"], 
-        accuracy_at_f1=at_f1["accuracy"],
-        precision_at_f2=at_f2["precision"], 
-        recall_at_f2=at_f2["recall"],
-        f1_at_f2=at_f2["f1"], 
-        accuracy_at_f2=at_f2["accuracy"],
-        )
-    """
-    
+        
     metrics = _calculate_metrics(scored, label_col, probability_col, evaluator, thresholds, positive_index)
     
     if validation_flag:
-        plot_base_path = "validation_plots/"; metric_base_path = "validation_metrics/"; params_base_path = "validation_params/"
+        plot_base_path = "validation_plots/" 
+        metric_base_path = "validation_metrics/" 
+        params_base_path = "validation_params/"
     elif sub_model:
-        plot_base_path = "submodels_plots/";  metric_base_path = "submodels_metrics/"; params_base_path = "submodels_params/"
+        plot_base_path = "submodels_plots/"  
+        metric_base_path = "submodels_metrics/" 
+        params_base_path = "submodels_params/"
     else:
-        plot_base_path = "plots/";            metric_base_path = "metrics/";          params_base_path = "params/"
+        plot_base_path = "plots/"            
+        metric_base_path = "metrics/"          
+        params_base_path = "params/"
 
     # NO model logging here
     scored = _get_scored(estimator, eval_df, label_col, probability_col, persist_eval=False)
@@ -364,7 +353,7 @@ def _log_single_fitted_estimator(eval_df,
 
     mlflow.spark.log_model(
         estimator,
-        artifact_path=f"{model_best_path}spark_model",
+        artifact_path=f"{model_base_path}best_model",
         pip_requirements=[f"pyspark=={spark.version}"]   # pin to your current Spark
     )
     mlflow.log_metrics(metrics)
@@ -374,6 +363,7 @@ def _log_single_fitted_estimator(eval_df,
     mlflow.log_figure(cm_f2,     f"{plot_base_path}confusion_at_f2.png")
     mlflow.log_figure(pr_curve,  f"{plot_base_path}pr_curve.png")
     mlflow.log_figure(roc_curve, f"{plot_base_path}roc_curve.png")
+
     return estimator
 
     """
@@ -383,52 +373,9 @@ def _log_single_fitted_estimator(eval_df,
             "evaluator": estimator.__class__.__name__,
             "evaluator_params": estimator.getParams(),
         }
-
-    #Charts and curves: 
-    confusion_matrix = _plt_confusion_matrix(scored, 
-                                             label_col, 
-                                             p_pos,
-                                             thr=0.5,
-                                             title=f'Confusion Matrix at default threshold=0.5')
-    confusion_matrix_f1 = _plt_confusion_matrix(scored,
-                                                label_col, 
-                                                p_pos, 
-                                                thr = metrics['optimal_threshold_f1'],
-                                                title=f"Confusion Matrix at f1 threshold={metrics['optimal_threshold_f1']}")
-    confusion_matrix_f2 = _plt_confusion_matrix(scored,
-                                                label_col, 
-                                                p_pos, 
-                                                thr = metrics['optimal_threshold_f2'],
-                                                title=f"Confusion Matrix at f2 threshold={metrics['optimal_threshold_f2']}")
+    """
     
-    ## PR and ROC curves
-    pr_curve, roc_curve = _get_curves(scored,label_col, probability_col, title_suffix="")
 
-
-    ###### MLFlow logging 
-
-
-    ## log metrics and parameters
-    mlflow.log_metrics(metrics)
-    #mlflow.log_params(params, artifact_path=f"{params_base_path}params_{estimator.name}")
-    mlflow.log_dict(params, f"{params_base_path}params_{getattr(estimator,'uid','model')}.json")
-
-    if sub_model:
-        estimator_name = estimator.name + '_'
-    else:
-        estimator_name = ""
-    # figures
-    mlflow.log_figure(confusion_matrix,   f"{plot_base_path}{estimator_name}confusion_default.png")
-    mlflow.log_figure(confusion_matrix_f1, f"{plot_base_path}{estimator_name}confusion_at_f1.png")
-    mlflow.log_figure(confusion_matrix_f2, f"{plot_base_path}{estimator_name}confusion_at_f2.png")
-    mlflow.log_figure(pr_curve,           f"{plot_base_path}{estimator_name}pr_curve.png")
-    mlflow.log_figure(roc_curve,          f"{plot_base_path}{estimator_name}roc_curve.png")
-        
-
-    return estimator"""
-
-
-# put this small helper near the top of your file (once):
 def _log_parent_best_and_tuner(fitted, *, num_folds=None):
     import mlflow, mlflow.spark
     from pyspark.ml.tuning import CrossValidatorModel, TrainValidationSplitModel
@@ -475,8 +422,6 @@ def _log_parent_best_and_tuner(fitted, *, num_folds=None):
         if num_folds is not None:
             tuner_info["numFolds"] = int(num_folds)
 
-
-    #mlflow.log_dict(,"")
     mlflow.log_dict(tuner_info, "tuner/summary.json")
     mlflow.log_params(_flatten_params(best))
     return best
@@ -584,23 +529,6 @@ def _get_feature_importances(estimator):
 
     return features
 
-"""
-def _plt_feature_importances_fig_old(df, top_n=20):
-
-    df = df.head(top_n)
-
-    features = pd.Series(df['feature_importances'], index=df['feature_name'])
-
-    fig,ax = plt.subplots()
-    features.plot.barh(ax=ax)
-    ax.set_title("XGBoost Feature Importances")
-    ax.set_ylabel("Feature Name")
-    plt.xlabel("Feature Importance")
-
-    return fig
-
-"""
-
 
 def _calculate_metrics(scored, label_col, probability_col, evaluator, thresholds, positive_index):
 
@@ -656,11 +584,6 @@ def _get_scored(model, eval_df, label_col, probability_col, persist_eval=True):
         raise Exception(f"{probability_col} not found in eval_df")
     
     return scored
-
-
-#def _plt_feature_importances(features):
-    
-
 
 def _log_single_fitted_estimator(eval_df,
                                  estimator,  # fitted PipelineModel or Model
@@ -723,8 +646,7 @@ def _log_single_fitted_estimator(eval_df,
     mlflow.log_figure(pr_curve,            f"{plot_base_path}pr_curve.png")
     mlflow.log_figure(roc_curve,           f"{plot_base_path}roc_curve.png")
 
-    #TODO: Test
-    #mlflow.log_figure(features_importance_fig, f"{plot_base_path}feature_importances.png")
+
 
     #mlflow.spark.log_model(spark_model=cvModel.bestModel, artifact_path="spark-crossvalidator-model")
     # If logging the entire CrossValidatorModel for its metrics/submodels:
@@ -794,8 +716,15 @@ def run_spark_ml_training(
         
         try:
             estimator = _log_single_fitted_estimator(
-                eval_df, best, evaluator, probability_col, label_col, positive_index,
-                sub_model=False, validation_flag=False, thresholds=thresholds
+                eval_df, 
+                best, 
+                evaluator, 
+                probability_col, 
+                label_col, 
+                positive_index,
+                sub_model=False, 
+                validation_flag=False, 
+                thresholds=thresholds
             )
             mlflow.spark.log_model(
                 best,
@@ -817,7 +746,10 @@ def run_spark_ml_training(
             tags.update({"run_id": run.info.run_id, "error": "Error in logging", "status": "error"})
             mlflow.set_tags(tags)
             raise
+        
+        
         """
+        # Ignore submodel logging
         try:
             _log_model_submodels(eval_df, 
                             estimator, # fitted estimator model
