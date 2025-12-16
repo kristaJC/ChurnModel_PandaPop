@@ -15,39 +15,19 @@ import mlflow
 import pandas as pd
 
 import mlflow.spark
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.getOrCreate()
+
+import numpy as np
 
 
 # =========================================================
 # Helpers
 # =========================================================
 
-#TODO:  Probably add some error checking for the binary classification evaluator
-
-# New - setting a default evaluator for binary classification CV
-def _set_evaluator(estimator, 
-                   evaluator, 
-                   label_col, 
-                   prediction_col, 
-                   probability_col, 
-                   collect_submodels=False, 
-                   metric="areaUnderPR"):
-    if isinstance(estimator, (CrossValidator, TrainValidationSplit)):
-
-        evaluator.setLabelCol(label_col)
-        #evaluator.setRawPredictionCol(probability_col)
-        evaluator.setMetricName(metric)
-
-        # set Evaluator and collectSubModels flag
-        estimator.setEvaluator(evaluator).setCollectSubModels(collect_submodels)
-        print("Setting estimator and evaluator for CV")
-
-    print("Setting estimator and evaluator for pipeline/estimator")
-    return estimator, evaluator
-
-def _best_model(estimator):
-    if isinstance(estimator, (CrossValidatorModel, TrainValidationSplitModel)):
-        return estimator.bestModel
-    return estimator
+def test_helpers():
+    print("TESTING HELPER FUNCTION")
+    return 
 
 
 def _flatten_params(model_or_stage, prefix=""):
@@ -77,7 +57,14 @@ def _positive_prob_col(df, col, pos_idx=1):
 
 
 def _tp_fp_fn_tn(df, label, prob_expr, thr):
-    pred = (prob_expr >= F.lit(thr)).cast("int")
+
+    if isinstance(prob_expr, str):
+        prob_col = F.col(prob_expr)
+    else:
+        prob_col = prob_expr
+
+    pred = (prob_col >= F.lit(thr)).cast("int")
+
     agg = df.agg(
         F.sum((F.col(label) == 1).cast("int") * pred).alias("tp"),
         F.sum((F.col(label) == 0).cast("int") * pred).alias("fp"),
@@ -281,201 +268,6 @@ def _plt_confusion_matrix(df,
 
     return _confusion_plot(tp, fp, fn, tn, title)
 
-def _log_single_fitted_estimator(eval_df, 
-                         estimator, # fitted estimator model
-                         evaluator, 
-                         probability_col, 
-                         label_col,
-                         positive_index,
-                         sub_model=False, 
-                         validation_flag=False,# Flag to indicate if it is a submodel or not
-                         thresholds=None
-                        ):
-    
-    if validation_flag:
-        model_base_path = "validation/"
-        plot_base_path = "validation_plots/"
-        metric_base_path = "validation_metrics/"
-        params_base_path = "validation_params/"
-    
-    if sub_model:
-        model_base_path = "submodels/"
-        plot_base_path = "submodels_plots/"
-        metric_base_path = "submodels_metrics/"
-        params_base_path = "submodels_params/"
-    
-    else:
-        model_base_path = ""
-        plot_base_path = "plots/"
-        metric_base_path = "metrics/"
-        params_base_path = "params/"
-
-
-    
-
-    # Get Metrics and log them
-    scored = _get_scored(estimator, eval_df,label_col, probability_col,persist_eval = True)
-    p_pos = _positive_prob_col(scored, probability_col, positive_index)
-        
-    metrics = _calculate_metrics(scored, label_col, probability_col, evaluator, thresholds, positive_index)
-    
-    if validation_flag:
-        plot_base_path = "validation_plots/" 
-        metric_base_path = "validation_metrics/" 
-        params_base_path = "validation_params/"
-    elif sub_model:
-        plot_base_path = "submodels_plots/"  
-        metric_base_path = "submodels_metrics/" 
-        params_base_path = "submodels_params/"
-    else:
-        plot_base_path = "plots/"            
-        metric_base_path = "metrics/"          
-        params_base_path = "params/"
-
-    # NO model logging here
-    scored = _get_scored(estimator, eval_df, label_col, probability_col, persist_eval=False)
-    p_pos  = _positive_prob_col(scored, probability_col, positive_index)
-
-    metrics = _calculate_metrics(scored, label_col, probability_col, positive_index, thresholds=thresholds)
-
-    params = {"estimator_class": estimator.__class__.__name__, **_flatten_params(estimator)}
-
-    cm_default = _plt_confusion_matrix(scored, label_col, p_pos, thr=0.5,
-                                       title="Confusion Matrix at default threshold=0.5")
-    cm_f1 = _plt_confusion_matrix(scored, label_col, p_pos, thr=metrics['optimal_threshold_f1'],
-                                  title=f"Confusion Matrix at f1 threshold={metrics['optimal_threshold_f1']}")
-    cm_f2 = _plt_confusion_matrix(scored, label_col, p_pos, thr=metrics['optimal_threshold_f2'],
-                                  title=f"Confusion Matrix at f2 threshold={metrics['optimal_threshold_f2']}")
-
-    scored_for_curves = scored.withColumn("_p", p_pos)
-    pr_curve, roc_curve = _get_curves(scored_for_curves, label_col, "_p")
-
-
-    mlflow.spark.log_model(
-        estimator,
-        artifact_path=f"{model_base_path}best_model",
-        pip_requirements=[f"pyspark=={spark.version}"]   # pin to your current Spark
-    )
-    mlflow.log_metrics(metrics)
-    mlflow.log_dict(params, f"{params_base_path}params_{getattr(estimator,'uid','model')}.json")
-    mlflow.log_figure(cm_default, f"{plot_base_path}confusion_default.png")
-    mlflow.log_figure(cm_f1,     f"{plot_base_path}confusion_at_f1.png")
-    mlflow.log_figure(cm_f2,     f"{plot_base_path}confusion_at_f2.png")
-    mlflow.log_figure(pr_curve,  f"{plot_base_path}pr_curve.png")
-    mlflow.log_figure(roc_curve, f"{plot_base_path}roc_curve.png")
-
-    return estimator
-
-    """
-    params = {
-            "estimator": estimator.__class__.__name__,
-            "estimator_params": estimator.getEstimatorParamMaps(),
-            "evaluator": estimator.__class__.__name__,
-            "evaluator_params": estimator.getParams(),
-        }
-    """
-    
-
-def _log_parent_best_and_tuner(fitted, *, num_folds=None):
-    import mlflow, mlflow.spark
-    from pyspark.ml.tuning import CrossValidatorModel, TrainValidationSplitModel
-
-    # pick best
-    best = fitted.bestModel if isinstance(fitted, (CrossValidatorModel, TrainValidationSplitModel)) else fitted
-
-    # log best once at stable path
-    mlflow.spark.log_model(best, artifact_path="models/best_model")
-    
-    #TODO:
-    #feature_importances_df = _get_feature_importances(best)
-    #feature_importances_fig = _plt_feature_importances(feature_importances_df)
-    #mlflow.log_figure(feature_importances_fig, "feature_importances.png")
-    #mlflow.log_dict(feature_importances, "feature_importances.json")
-
-    # tuner summary (version-tolerant; no .parent)
-    tuner_info = {"tuner_type": type(fitted).__name__}
-    if isinstance(fitted, CrossValidatorModel):
-        # param maps
-        pms_raw = getattr(fitted, "getEstimatorParamMaps", None)
-        if callable(pms_raw):
-            pms_raw = pms_raw()
-        else:
-            pms_raw = getattr(fitted, "estimatorParamMaps", []) or []
-        param_maps = [{getattr(p, "name", str(p)): str(v) for p, v in pm.items()} for pm in pms_raw]
-
-        avg = [float(x) for x in getattr(fitted, "avgMetrics", [])]
-        best_idx = int(max(range(len(avg)), key=lambda i: avg[i])) if avg else None
-
-        # infer num_folds if not provided and subModels exist
-        if num_folds is None:
-            sub = getattr(fitted, "subModels", None)
-            if sub and len(sub) > 0 and isinstance(sub[0], (list, tuple)):
-                num_folds = len(sub[0])
-
-        tuner_info.update({
-            "grid_size": len(param_maps),
-            "best_index": best_idx,
-            "best_avg_metric": (avg[best_idx] if best_idx is not None else None),
-            "avg_metrics": avg,
-            "param_maps": param_maps,
-        })
-        if num_folds is not None:
-            tuner_info["numFolds"] = int(num_folds)
-
-    mlflow.log_dict(tuner_info, "tuner/summary.json")
-    mlflow.log_params(_flatten_params(best))
-    return best
-
-def _log_model_submodels(eval_df, 
-                         estimator, # fitted estimator model
-                         evaluator, 
-                         probability_col, 
-                         label_col,
-                         positive_index,
-                         collect_submodels=False,
-                         validation_flag = False,
-                         thresholds=None):
-
-    """
-        Helper function to get and log all of the submodels trained for a CV pipeline; 
-        Best model is the parent model.
-        If not cv, just logs the estimator model and returns the estimator
-    """
-
-    # For each submodel - log them separetly in the submodels directory
-
-    if collect_submodels and getattr(estimator, "subModels", None) is not None:
-        for gi, fold_models in enumerate(estimator.subModels):           # grid index
-            for fi, sm in enumerate(fold_models):                         # fold index
-                estimator = _log_single_fitted_estimator(eval_df, 
-                            estimator, # fitted estimator model
-                            evaluator, 
-                            probability_col, 
-                            label_col,
-                            positive_index,
-                            sub_model=True,
-                            thresholds=thresholds,
-                             # Flag to indicate if it is a submodel or not
-                        )
-        
-    """
-    if collect_submodels:
-        for sub_model in sub_models:
-
-            estimator = _log_single_fitted_estimator(eval_df, 
-                            estimator, # fitted estimator model
-                            evaluator, 
-                            probability_col, 
-                            label_col,
-                            positive_index,
-                            sub_model=True, # Flag to indicate if it is a submodel or not
-                        )"""
-    
-    return 
-
-
-
-    
 def _plt_feature_importances(df):
 
     if df is None:
@@ -507,10 +299,10 @@ def _get_feature_importances(estimator):
     input_cols = []
 
     if isinstance(estimator,PipelineModel):
-        if isinstance(estimator.stages[-1], SparkXGBClassifier):
+        if hasattr(estimator.stages[-1], "get_feature_importances"):
             feature_importances = estimator.stages[-1].get_feature_importances().values()
         else:
-            print('Cannot get feature importance for this estimator because it is not a SparkXGBClassifier')
+            print('Cannot get feature importance for this estimator the function is not available')
             return None
         if isinstance(estimator.stages[-2], VectorAssembler):
             input_cols = estimator.stages[-2].getInputCols() # must be the vector assembler before the last estimator
@@ -585,6 +377,181 @@ def _get_scored(model, eval_df, label_col, probability_col, persist_eval=True):
     
     return scored
 
+
+# New - setting a default evaluator for binary classification CV
+def _set_evaluator(estimator, 
+                   evaluator, 
+                   label_col, 
+                   prediction_col, 
+                   probability_col, 
+                   collect_submodels=False, 
+                   metric="areaUnderPR"):
+    
+    if isinstance(estimator, (CrossValidator, TrainValidationSplit)):
+
+        evaluator.setLabelCol(label_col)
+        evaluator.setMetricName(metric)
+
+        # set Evaluator and collectSubModels flag
+        estimator.setEvaluator(evaluator).setCollectSubModels(collect_submodels)
+        print("Setting estimator and evaluator for CV")
+
+    print("Setting estimator and evaluator for pipeline/estimator")
+    return estimator, evaluator
+
+def _best_model(estimator):
+    if isinstance(estimator, (CrossValidatorModel, TrainValidationSplitModel)):
+        return estimator.bestModel
+    return estimator
+
+
+def _log_single_fitted_estimator_duplicate(eval_df, 
+                         estimator, # fitted estimator model
+                         evaluator, 
+                         probability_col, 
+                         label_col,
+                         positive_index,
+                         sub_model=False, 
+                         validation_flag=False,# Flag to indicate if it is a submodel or not
+                         thresholds=None
+                        ):
+
+    # Get Metrics and log them
+    scored = _get_scored(estimator, eval_df,label_col, probability_col,persist_eval = True)
+    p_pos = _positive_prob_col(scored, probability_col, positive_index)
+        
+    metrics = _calculate_metrics(scored, label_col, probability_col, evaluator, thresholds, positive_index)
+    
+    if validation_flag:
+        model_base_path = "validation/"
+        plot_base_path = "validation_plots/" 
+        metric_base_path = "validation_metrics/" 
+        params_base_path = "validation_params/"
+    elif sub_model:
+        model_base_path = "submodels/"
+        plot_base_path = "submodels_plots/"  
+        metric_base_path = "submodels_metrics/" 
+        params_base_path = "submodels_params/"
+    else:
+        model_base_path = ""
+        plot_base_path = "plots/"            
+        metric_base_path = "metrics/"          
+        params_base_path = "params/"
+
+    # NO model logging here
+    scored = _get_scored(estimator, eval_df, label_col, probability_col, persist_eval=False)
+    p_pos  = _positive_prob_col(scored, probability_col, positive_index)
+
+    metrics = _calculate_metrics(scored, label_col, probability_col, positive_index, thresholds=thresholds)
+
+    params = {"estimator_class": estimator.__class__.__name__, **_flatten_params(estimator)}
+
+    cm_default = _plt_confusion_matrix(scored, label_col, p_pos, thr=0.5,
+                                       title="Confusion Matrix at default threshold=0.5")
+    cm_f1 = _plt_confusion_matrix(scored, label_col, p_pos, thr=metrics['optimal_threshold_f1'],
+                                  title=f"Confusion Matrix at f1 threshold={metrics['optimal_threshold_f1']}")
+    cm_f2 = _plt_confusion_matrix(scored, label_col, p_pos, thr=metrics['optimal_threshold_f2'],
+                                  title=f"Confusion Matrix at f2 threshold={metrics['optimal_threshold_f2']}")
+
+    scored_for_curves = scored.withColumn("_p", p_pos)
+    pr_curve, roc_curve = _get_curves(scored_for_curves, label_col, "_p")
+
+
+    mlflow.spark.log_model(
+        estimator,
+        artifact_path=f"{model_base_path}best_model",
+        pip_requirements=[f"pyspark=={spark.version}"]   # pin to your current Spark
+    )
+    mlflow.log_metrics(metrics)
+    mlflow.log_dict(params, f"{params_base_path}params_{getattr(estimator,'uid','model')}.json")
+    mlflow.log_figure(cm_default, f"{plot_base_path}confusion_default.png")
+    mlflow.log_figure(cm_f1,     f"{plot_base_path}confusion_at_f1.png")
+    mlflow.log_figure(cm_f2,     f"{plot_base_path}confusion_at_f2.png")
+    mlflow.log_figure(pr_curve,  f"{plot_base_path}pr_curve.png")
+    mlflow.log_figure(roc_curve, f"{plot_base_path}roc_curve.png")
+
+    return estimator
+
+
+def _log_parent_best_and_tuner(fitted, *, num_folds=None):
+    import mlflow, mlflow.spark
+    from pyspark.ml.tuning import CrossValidatorModel, TrainValidationSplitModel
+
+    # pick best
+    best = fitted.bestModel if isinstance(fitted, (CrossValidatorModel, TrainValidationSplitModel)) else fitted
+
+    # log best once at stable path
+    mlflow.spark.log_model(best, artifact_path="models/best_model")
+    
+
+    # tuner summary (version-tolerant; no .parent)
+    tuner_info = {"tuner_type": type(fitted).__name__}
+    if isinstance(fitted, CrossValidatorModel):
+        # param maps
+        pms_raw = getattr(fitted, "getEstimatorParamMaps", None)
+        if callable(pms_raw):
+            pms_raw = pms_raw()
+        else:
+            pms_raw = getattr(fitted, "estimatorParamMaps", []) or []
+        param_maps = [{getattr(p, "name", str(p)): str(v) for p, v in pm.items()} for pm in pms_raw]
+
+        avg = [float(x) for x in getattr(fitted, "avgMetrics", [])]
+        best_idx = int(max(range(len(avg)), key=lambda i: avg[i])) if avg else None
+
+        # infer num_folds if not provided and subModels exist
+        if num_folds is None:
+            sub = getattr(fitted, "subModels", None)
+            if sub and len(sub) > 0 and isinstance(sub[0], (list, tuple)):
+                num_folds = len(sub[0])
+
+        tuner_info.update({
+            "grid_size": len(param_maps),
+            "best_index": best_idx,
+            "best_avg_metric": (avg[best_idx] if best_idx is not None else None),
+            "avg_metrics": avg,
+            "param_maps": param_maps,
+        })
+        if num_folds is not None:
+            tuner_info["numFolds"] = int(num_folds)
+
+    mlflow.log_dict(tuner_info, "tuner/summary.json")
+    mlflow.log_params(_flatten_params(best))
+    return best
+
+def _log_model_submodels(eval_df, 
+                         estimator, # fitted estimator model
+                         evaluator, 
+                         probability_col, 
+                         label_col,
+                         positive_index,
+                         collect_submodels=False,
+                         validation_flag = False,
+                         thresholds=None):
+
+    """
+        Helper function to get and log all of the submodels trained for a CV pipeline; 
+        Best model is the parent model.
+        If not cv, just logs the estimator model and returns the estimator
+    """
+
+    # For each submodel - log them separately in the submodels directory
+
+    if collect_submodels and getattr(estimator, "subModels", None) is not None:
+        for gi, fold_models in enumerate(estimator.subModels):           # grid index
+            for fi, sm in enumerate(fold_models):                         # fold index
+                estimator = _log_single_fitted_estimator(eval_df, 
+                            estimator, # fitted estimator model
+                            evaluator, 
+                            probability_col, 
+                            label_col,
+                            positive_index,
+                            sub_model=True,
+                            thresholds=thresholds,
+                             # Flag to indicate if it is a submodel or not
+                        )
+    
+    return 
+
 def _log_single_fitted_estimator(eval_df,
                                  estimator,  # fitted PipelineModel or Model
                                  evaluator,
@@ -596,16 +563,19 @@ def _log_single_fitted_estimator(eval_df,
                                  thresholds=None):
     # choose artifact subfolders for plots/metrics only
     if validation_flag:
-        plot_base_path = "validation_plots/"
-        metric_base_path = "validation_metrics/"
+        model_base_path = "validation/"
+        plot_base_path = "validation_plots/" 
+        metric_base_path = "validation_metrics/" 
         params_base_path = "validation_params/"
     elif sub_model:
-        plot_base_path = "submodels_plots/"
-        metric_base_path = "submodels_metrics/"
+        model_base_path = "submodels/"
+        plot_base_path = "submodels_plots/"  
+        metric_base_path = "submodels_metrics/" 
         params_base_path = "submodels_params/"
     else:
-        plot_base_path = "plots/"
-        metric_base_path = "metrics/"
+        model_base_path = ""
+        plot_base_path = "plots/"            
+        metric_base_path = "metrics/"          
         params_base_path = "params/"
 
     # --- NO model logging here ---
@@ -647,15 +617,7 @@ def _log_single_fitted_estimator(eval_df,
     mlflow.log_figure(roc_curve,           f"{plot_base_path}roc_curve.png")
 
 
-
-    #mlflow.spark.log_model(spark_model=cvModel.bestModel, artifact_path="spark-crossvalidator-model")
-    # If logging the entire CrossValidatorModel for its metrics/submodels:
-    # mlflow.spark.log_model(spark_model=cvModel, artifact_path="spark-crossvalidator")
     return estimator
-
-
-from pyspark.sql import SparkSession
-spark = SparkSession.builder.getOrCreate()
 
 def run_spark_ml_training(
         estimator,
@@ -707,6 +669,7 @@ def run_spark_ml_training(
             fitted = estimator.fit(train_df) # Fitted is the fitted CrossValidator flag
             print("Done Fitting Model...")
 
+            ### First we log the best parent model and tuner
             best = _log_parent_best_and_tuner(fitted, num_folds=num_folds)
 
         except Exception as e:
@@ -748,21 +711,22 @@ def run_spark_ml_training(
             raise
         
         
-        """
-        # Ignore submodel logging
-        try:
-            _log_model_submodels(eval_df, 
-                            estimator, # fitted estimator model
-                            evaluator, 
-                            probability_col, 
-                            label_col,
-                            positive_index,
-                            collect_submodels=True,
-                            validation_flag = False,thresholds=thresholds)
-        except:
-            print("Could not log submodels")
-            pass 
-        """
+        
+        if collect_submodels:
+            # Ignore submodel logging
+            try:
+                _log_model_submodels(eval_df, 
+                                estimator, # fitted estimator model
+                                evaluator, 
+                                probability_col, 
+                                label_col,
+                                positive_index,
+                                collect_submodels=True,
+                                validation_flag = False,thresholds=thresholds)
+            except:
+                print("Could not log submodels")
+                pass 
+        
 
         if val_df is not None:
             _ = _log_single_fitted_estimator(
